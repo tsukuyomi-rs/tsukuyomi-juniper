@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["builder","Components for building an `App`."],["service","The definition of components for serving an HTTP application by using `App`."]],"struct":[["App","The main type which represents an HTTP application."]]});

@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["RuntimeMode",""]],"fn":[["blocking","Enter a blocking section of code if available."],["current_mode",""]],"struct":[["BlockingError","A error type which will be returned from `blocking`."]]});

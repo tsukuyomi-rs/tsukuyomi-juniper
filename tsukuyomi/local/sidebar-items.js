@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["Client","A type which emulates a connection to a peer."],["Data","A type representing a received HTTP message data from the server."],["LocalRequest","A type which emulates an HTTP request from a peer."],["LocalServer","A local server which emulates an HTTP service without using the low-level transport."],["RequestBody",""]]});

@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["ResponseBody","A type representing the message body in HTTP response."]],"trait":[["AsyncResponder","The async variant of `Responder`."],["Responder","A trait representing the conversion to an HTTP response."]],"type":[["Output","The type representing outputs returned from handlers."]]});

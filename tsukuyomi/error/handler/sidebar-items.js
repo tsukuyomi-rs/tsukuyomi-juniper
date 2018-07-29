@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["DefaultErrorHandler","An implementor of `ErrorHandler` used in `App` by default."]],"trait":[["ErrorHandler","A trait representing error handlers."]]});

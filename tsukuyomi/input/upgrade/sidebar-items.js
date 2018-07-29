@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["UpgradeContext","Contextual information used at upgrading to another protocol."],["Upgraded","An upgraded HTTP connection."]],"trait":[["OnUpgrade","A trait representing a function called at performing the protocol upgrade."]]});

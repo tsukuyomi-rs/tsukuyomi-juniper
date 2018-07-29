@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["AppService","A `Service` representation of the application, created by `App`."],["AppServiceFuture","A future for managing an incoming HTTP request, created by `AppService`."]]});

@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["AfterHandle","The type representing a return value from `Modifier::after_handle`."],["BeforeHandle","The type representing a return value from `Modifier::before_handle`."]],"trait":[["Modifier","A trait representing a `Modifier`."]]});
