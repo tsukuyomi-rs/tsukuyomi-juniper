@@ -8,7 +8,8 @@
 //! # #[macro_use]
 //! # extern crate juniper;
 //! # use tsukuyomi::App;
-//! use tsukuyomi_juniper::{GraphQLState, AppGraphQLExt};
+//! use tsukuyomi_juniper::{GraphQLState, GraphQLEndpoint};
+//! use tsukuyomi_juniper::endpoint::graphiql;
 //!
 //! struct Context {/* ... */}
 //! impl juniper::Context for Context {}
@@ -22,12 +23,11 @@
 //! # fn main() -> tsukuyomi::AppResult<()> {
 //! let context = Context {/* ... */};
 //! let schema = juniper::RootNode::new(Query {/*...*/}, Mutation {/*...*/});
-//!
 //! let state = GraphQLState::new(context, schema);
 //!
 //! let app = App::builder()
-//!     .graphql("/graphql", state)
-//!     .graphiql("/graphiql", "http://localhost:4000/graphql")
+//!     .scope(GraphQLEndpoint::new(state, "/graphql"))
+//!     .route(("/graphiql", graphiql("http://localhost:4000/graphql")))
 //!     .finish()?;
 //! # Ok(())
 //! # }
@@ -39,7 +39,7 @@
 #![deny(unreachable_pub)]
 #![warn(unused_extern_crates)]
 #![deny(bare_trait_objects)]
-#![warn(warnings)]
+#![deny(unused)]
 
 #[macro_use]
 extern crate futures;
@@ -47,7 +47,6 @@ extern crate bytes;
 #[macro_use]
 extern crate failure;
 extern crate http;
-extern crate hyperx;
 extern crate juniper;
 extern crate mime;
 #[macro_use]
@@ -61,17 +60,16 @@ extern crate tsukuyomi;
 use bytes::Bytes;
 use futures::{Async, Future, Poll};
 use http::{header, Response, StatusCode};
-use hyperx::header::ContentType;
 use percent_encoding::percent_decode;
 use std::fmt;
 use std::sync::Arc;
 
 use juniper::{GraphQLType, InputValue, RootNode};
 
-use tsukuyomi::app::AppBuilder;
 use tsukuyomi::input::body::FromData;
+use tsukuyomi::input::header::content_type;
 use tsukuyomi::output::{Output, Responder};
-use tsukuyomi::rt::blocking::blocking;
+use tsukuyomi::server::blocking::blocking;
 use tsukuyomi::{Error, Input};
 
 /// Abstraction of an executor which processes asynchronously the GraphQL requests.
@@ -300,9 +298,9 @@ impl GraphQLRequest {
 }
 
 impl FromData for GraphQLRequest {
-    fn from_data(data: Bytes, input: &Input) -> Result<Self, Error> {
-        if let Some(ContentType(mime)) = input.header()? {
-            if mime != mime::APPLICATION_JSON {
+    fn from_data(data: Bytes, input: &mut Input) -> Result<Self, Error> {
+        if let Some(mime) = content_type(input)? {
+            if *mime != mime::APPLICATION_JSON {
                 return Err(Error::bad_request(format_err!(
                     "The value of Content-type is not equal to application/json"
                 )));
@@ -353,12 +351,11 @@ impl GraphQLResponse {
 }
 
 impl Responder for GraphQLResponse {
-    fn respond_to(self, _input: &Input) -> Result<Output, Error> {
+    fn respond_to(self, _input: &mut Input) -> Result<Output, Error> {
         Response::builder()
             .status(self.status)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(self.body)
-            .map(Into::into)
+            .body(self.body.into())
             .map_err(Error::internal_server_error)
     }
 }
@@ -367,12 +364,13 @@ impl Responder for GraphQLResponse {
 pub mod endpoint {
     use bytes::Bytes;
     use futures::{Future, IntoFuture};
-    use http::{header, Response};
+    use http::{header, Method, Response};
     use juniper;
 
+    use tsukuyomi::app::builder::{Scope, ScopeConfig};
     use tsukuyomi::error::Error;
-    use tsukuyomi::handler::Handler;
-    use tsukuyomi::input::Input;
+    use tsukuyomi::handler::{wrap_async, wrap_ready, Handler};
+    use tsukuyomi::input::{self, Input};
     use tsukuyomi::output::{Output, Responder};
 
     use super::{GraphQLExecutor, GraphQLRequest};
@@ -386,19 +384,18 @@ pub mod endpoint {
     struct GraphiQLSource(String);
 
     impl Responder for GraphiQLSource {
-        fn respond_to(self, _: &Input) -> Result<Output, Error> {
+        fn respond_to(self, _: &mut Input) -> Result<Output, Error> {
             Response::builder()
                 .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                .body(self.0)
-                .map(Into::into)
+                .body(self.0.into())
                 .map_err(Error::internal_server_error)
         }
     }
 
     /// Creates a handler generating the HTML source to show a GraphiQL interface.
-    pub fn graphiql(url: &str) -> Handler {
+    pub fn graphiql(url: &str) -> impl Handler {
         let source = Bytes::from(juniper::http::graphiql::graphiql_source(url));
-        Handler::new_ready(move |_| {
+        wrap_ready(move |_| {
             Response::builder()
                 .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
                 .body(source.clone())
@@ -412,20 +409,22 @@ pub mod endpoint {
     /// See [the documentation of GraphQL][get-request] for details.
     ///
     /// [get-request]: https://graphql.org/learn/serving-over-http/#get-request
-    pub fn graphql_get<Exec>() -> Handler
+    pub fn graphql_get<Exec>() -> impl Handler
     where
         Exec: GraphQLExecutor + Send + Sync + 'static,
         Exec::Future: Send + 'static,
     {
-        Handler::new_async(|input| {
+        wrap_async(|input| {
             let request = input
                 .uri()
                 .query()
                 .ok_or_else(|| Error::bad_request(format_err!("empty query")))
                 .and_then(GraphQLRequest::from_query);
             request.into_future().and_then(|request| {
-                Input::with_current(|input| {
-                    let cx = input.get::<Exec>();
+                input::with_get_current(|input| {
+                    let cx = input
+                        .get::<Exec>()
+                        .expect("Failed to get the reference to GraphQL executor.");
                     cx.execute(request)
                 })
             })
@@ -438,68 +437,64 @@ pub mod endpoint {
     /// See [the documentation of GraphQL][post-request] for details.
     ///
     /// [post-request]: https://graphql.org/learn/serving-over-http/#post-request
-    pub fn graphql_post<Exec>() -> Handler
+    pub fn graphql_post<Exec>() -> impl Handler
     where
         Exec: GraphQLExecutor + Send + Sync + 'static,
         Exec::Future: Send + 'static,
     {
-        Handler::new_async(|input| {
+        wrap_async(|input| {
             let request = input.body_mut().read_all().convert_to::<GraphQLRequest>();
             request.into_future().and_then(|request| {
-                Input::with_current(|input| {
-                    let cx = input.get::<Exec>();
+                input::with_get_current(|input| {
+                    let cx = input
+                        .get::<Exec>()
+                        .expect("Failed to get the reference to GraphQL executor.");
                     cx.execute(request)
                 })
             })
         })
     }
-}
 
-/// A set of extensions for registration of GraphQL endpoints into `App`.
-pub trait AppGraphQLExt: sealed::Sealed {
-    /// Registers a set of GraphQL handlers mounted to the provided path.
-    ///
-    /// The following endpoints will be registered:
-    ///
-    /// * `GET <path>`
-    /// * `POST <path>`
-    fn graphql<T>(&mut self, path: &str, executor: T) -> &mut Self
-    where
-        T: GraphQLExecutor + Send + Sync + 'static,
-        T::Future: Send + 'static;
-
-    /// Registers a GraphiQL endpoint mounted to the provided path into this application.
-    fn graphiql(&mut self, path: &str, url: &str) -> &mut Self;
-}
-
-impl AppGraphQLExt for AppBuilder {
-    fn graphql<T>(&mut self, path: &str, executor: T) -> &mut Self
+    /// A set of values for registration of GraphQL endpoints.
+    #[derive(Debug)]
+    pub struct GraphQLEndpoint<T>
     where
         T: GraphQLExecutor + Send + Sync + 'static,
         T::Future: Send + 'static,
     {
-        self.manage(executor).mount(path, |m| {
-            m.get("/").handle(endpoint::graphql_get::<T>());
-            m.post("/").handle(endpoint::graphql_post::<T>());
-        })
+        executor: T,
+        path: String,
     }
 
-    fn graphiql(&mut self, path: &str, url: &str) -> &mut Self {
-        self.mount(path, |m| {
-            m.get("/").handle(endpoint::graphiql(url));
-        })
+    impl<T> GraphQLEndpoint<T>
+    where
+        T: GraphQLExecutor + Send + Sync + 'static,
+        T::Future: Send + 'static,
+    {
+        /// Create a new instance of `GraphQLEndpoint` from the specified configuration.
+        pub fn new(executor: T, path: impl Into<String>) -> GraphQLEndpoint<T> {
+            GraphQLEndpoint {
+                executor,
+                path: path.into(),
+            }
+        }
+    }
+
+    impl<T> ScopeConfig for GraphQLEndpoint<T>
+    where
+        T: GraphQLExecutor + Send + Sync + 'static,
+        T::Future: Send + 'static,
+    {
+        fn configure(self, scope: &mut Scope) {
+            scope.set(self.executor);
+            scope.prefix(&self.path);
+            scope.route(("/", Method::GET, graphql_get::<T>()));
+            scope.route(("/", Method::POST, graphql_post::<T>()));
+        }
     }
 }
 
-// TODO: impl for Mount
-
-mod sealed {
-    use tsukuyomi::app::AppBuilder;
-
-    pub trait Sealed {}
-
-    impl Sealed for AppBuilder {}
-}
+pub use endpoint::GraphQLEndpoint;
 
 #[allow(unreachable_pub)]
 #[cfg(test)]
@@ -513,8 +508,7 @@ mod tests {
     use percent_encoding::{utf8_percent_encode, QUERY_ENCODE_SET};
     use std::cell::RefCell;
 
-    use tsukuyomi::local::{Client, LocalServer};
-    use tsukuyomi::output::Data;
+    use tsukuyomi::local::{Client, Data, LocalServer};
     use tsukuyomi::App;
 
     type Schema = RootNode<'static, Database, EmptyMutation<Database>>;
@@ -524,7 +518,7 @@ mod tests {
         let schema = Schema::new(Database::new(), EmptyMutation::<Database>::new());
         let state = GraphQLState::new(context, schema);
 
-        App::builder().graphql("/", state).finish()
+        App::builder().scope(GraphQLEndpoint::new(state, "/")).finish()
     }
 
     struct TestTsukuyomiIntegration<'a> {
@@ -561,17 +555,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_tsukuyomi_integration() {
-        let app = make_tsukuyomi_app().expect("failed to create an App.");
-        let mut server = LocalServer::new(app).expect("failed to create LocalServer");
-        let integration = TestTsukuyomiIntegration {
-            client: RefCell::new(server.client()),
-        };
-
-        http_tests::run_http_test_suite(&integration);
-    }
-
     fn make_test_response(response: Response<Data>) -> http_tests::TestResponse {
         let status_code = response.status().as_u16() as i32;
 
@@ -590,5 +573,16 @@ mod tests {
             content_type,
             body: Some(body),
         }
+    }
+
+    #[test]
+    fn test_tsukuyomi_integration() {
+        let app = make_tsukuyomi_app().expect("failed to create an App.");
+        let mut server = LocalServer::new(app).expect("failed to create LocalServer");
+        let integration = TestTsukuyomiIntegration {
+            client: RefCell::new(server.client()),
+        };
+
+        http_tests::run_http_test_suite(&integration);
     }
 }
